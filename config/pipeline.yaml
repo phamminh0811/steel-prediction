@@ -1,0 +1,103 @@
+# Feature-selection pipeline config. When the real data is available, usually only `input`,
+# `catalog` and (if column names differ) `targets.*.column` / `catalog.aliases_path` need editing.
+
+run:
+  output_dir: outputs/run_latest      # every stage writes its artifacts here
+  seed: 42
+
+spark:
+  master: local[*]                    # ignored when a SparkSession already exists (cluster / Databricks)
+  app_name: fe-coal-ironore
+  shuffle_partitions: 16
+  driver_memory: 6g                  # local mode only; on OutOfMemoryError raise this or lower model.parallel_tasks
+
+input:
+  path: data/synthetic/wide_mixed.parquet   # .parquet / .csv / directory of either
+  format: auto                        # auto | wide | long
+  date_col: date
+  series_col: series                  # long format only
+  value_col: value                    # long format only
+  frequency: W-FRI                    # all series are aligned to this weekly anchor (last value of the week)
+  start_date: null                    # optional "YYYY-MM-DD" filter
+  end_date: null
+
+catalog:
+  path: catalog/tradingeconomics_feature_groups.json   # detailed list OR grouped {asset_class, group, members}
+  aliases_path: config/aliases.yaml   # manual column -> symbol overrides (wins over automatic matching)
+  allow_fuzzy: false                  # fuzzy matches are only reported, never applied, unless true
+  fuzzy_cutoff: 0.92
+  unassigned_group: _UNASSIGNED       # data columns that match nothing land here
+
+targets:
+  # name -> how to find the column. `symbol` is matched through the catalog, `column` overrides it.
+  coal_newcastle: {symbol: "XAL1:COM", family: coal}
+  coal_coking:    {symbol: "DJM:COM",  family: coal}
+  iron_ore:       {symbol: "SCO:COM",  family: iron_ore}
+  iron_ore_dce:   {symbol: "IOE:COM",  family: iron_ore}
+  horizons: [1, 4]                    # forward log-return horizons in weeks
+  required: [iron_ore, coal_newcastle]  # pipeline stops if these are missing; others are skipped with a warning
+
+quality:
+  min_history_weeks: 260              # >= 5 years of non-null values
+  max_missing_ratio: 0.20             # after the series' first value
+  max_ffill_weeks: 4                  # gaps up to this length are forward-filled, longer gaps stay null
+  max_stale_weeks: 12                 # last value older than this before data end -> discontinued
+  max_zero_change_ratio: 0.50         # pegged / illiquid series
+  winsor_mad: 8.0                     # returns beyond median +- k * MAD are clipped
+  jump_flag_logret: 1.0               # |log return| above this in one week is reported as a possible unit break
+
+transform:
+  # per asset class: logret (log diff), diff (level diff, e.g. yields), pct (simple return)
+  by_asset_class:
+    commodity: logret
+    stock_index: logret
+    share: logret
+    currency: logret
+    bond: diff
+    _default: logret
+  feature_windows: [1, 4]             # change over 1 and 4 weeks used when scoring relevance
+  max_lag: 8                          # lead-lag scan: feature at t-lag vs target change t -> t+h
+  min_lag: 0                          # set to 1 if a feature's week-end close can be later than the target's
+
+relevance:
+  min_abs_spearman: 0.06              # candidate must beat this on at least one target/horizon
+  n_periods: 4                        # stability: data split into this many consecutive blocks
+  min_sign_consistency: 0.75          # share of blocks where the correlation keeps its overall sign
+  keep_top_per_target: 100            # union of top-N per task goes on; low caps let proxies crowd out real drivers
+
+redundancy:
+  corr_threshold: 0.85                # |corr| of returns above this -> same cluster, keep the best scored
+
+model:
+  enabled: true
+  algorithm: random_forest            # random_forest | gbt
+  n_folds: 4                          # expanding-window time-series folds
+  parallel_tasks: 2                   # tasks fitted concurrently; each holds its own training data in memory
+  num_trees: 100
+  max_depth: 5
+  weight: 0.4                         # final score = (1 - weight) * relevance + weight * model importance
+
+selection:
+  k_min: 70
+  k_max: 100
+  k_target: 85
+  max_share_per_group: 0.20           # no single group takes more than 20% of the slots
+  redundancy_penalty: 0.5             # greedy pick: score - penalty * max |corr| with already chosen features
+  min_per_target: 12                  # each target keeps at least its own 12 best (before the global ranking)
+  must_include_symbols:               # domain priors, kept if they pass the quality filter
+    - "SCO:COM"   # iron ore
+    - "IOE:COM"   # iron ore CNY
+    - "DJM:COM"   # coking coal
+    - "XAL1:COM"  # Newcastle coal
+    - "HRC:COM"   # HRC steel
+    - "JBP:COM"   # steel rebar
+    - "SSC:COM"   # scrap steel
+    - "SPSCFI:COM"  # containerized freight index
+    - "USDCNY:CUR"
+    - "AUDUSD:CUR"
+    - "USDBRL:CUR"
+  relax_steps: 3                      # if fewer than k_min survive, thresholds are relaxed this many times
+
+features:
+  lags: [0, 1, 2, 4]                  # lags of the transformed selected series in the final table
+  rolling_windows: [4, 13]            # rolling mean of weekly change (momentum)

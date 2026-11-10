@@ -1,0 +1,6 @@
+# Manual mapping: data column name -> catalog symbol. Wins over every automatic match.
+# Use it for columns the matcher reports as ambiguous / fuzzy / unmatched in catalog_report.json.
+# Example:
+#   "iron_ore_62fe_cfr": "SCO:COM"
+#   "UK 10Y": "GUKG10:IND"
+aliases: {}

@@ -1,0 +1,9 @@
+pyspark>=3.3,<4.1
+pandas>=1.5
+numpy>=1.23
+scipy>=1.9
+pyyaml>=6.0
+pyarrow>=10
+# only for re-scraping the Trading Economics catalog
+playwright>=1.40
+beautifulsoup4>=4.12
